@@ -36,31 +36,36 @@ async def lifespan(app: FastAPI):
             alias_to_id[alias.lower()] = int(law_id_str)
 
     # Precompile regexes used for detection
-    # Abbreviation variants for units
+    # Abbreviation variants for units - expanded to handle more cases
     unit_patterns = {
-        "subpoint": r"(?:подпункт(?:а|у|ом|е)?|пп\.|подп\.)",
-        "point": r"(?:пункт(?:а|у|ом|е)?|п\.|ч\.|часть(?:и|ю)?)",
-        "article": r"(?:статья|ст\.)",
+        "subpoint": r"(?:подпункт(?:а|у|ом|е)?|пп\.|подп\.|подпункты)",
+        "point": r"(?:пункт(?:а|у|ом|е)?|п\.|ч\.|часть(?:и|ю)?|части)",
+        "article": r"(?:статья|ст\.|статьи)",
     }
 
-    # Numbers can be like 12, 4.6, 43.2-6, 1, 2, 3, 5 и 6, а, б, в, с
+    # Enhanced number patterns to handle complex cases like 1048.15-8, 6.9-13, 1930.7
     num = r"[0-9]+(?:\.[0-9]+)*(?:-[0-9]+)?"
     letter = r"[А-Яа-яA-Za-z]"
-    # Lists like "1, 2, 3" or "а, б и в" or "4.2 и 5.3"
+    # Lists like "1, 2, 3" or "а, б и в" or "4.2 и 5.3" or "я, 26, 29, 22, 3"
     list_sep = r"\s*,\s*|\s+и\s+"
     list_num = rf"(?:{num}|{letter})(?:(?:{list_sep})(?:{num}|{letter}))*"
 
-    # Law name capture: greedy up to end or punctuation; we will resolve via aliases
-    # Common law abbreviations (e.g., НК РФ, УК РФ, ГК РФ, КоАП РФ, АПК РФ, ТК РФ, ГПК РФ, и т.д.)
-    common_law_tail = r"(?:РФ|Российской Федерации|России)"
+    # Simplified and more robust law name capture
+    law_name_pattern = r"""
+        (?P<lawname>
+            [А-Яа-я\w\s«»\-\.\"№Nо]+?
+            (?:кодекс|Кодекс|закон|Закон|ФЗ|КоАП|АПК|ГПК|ГК|УК|НК|Указ|указ|Положение|положение)
+            [А-Яа-я\w\s«»\-\.\"№Nо]*
+        )
+    """
 
-    # Example full pattern capturing optional subpoint, optional point/part, article, and law name
+    # Enhanced full pattern with better law name matching
     pattern = rf"""
         (?P<subunit>(?:{unit_patterns['subpoint']})\s*(?P<subvalues>{list_num}))?\s*
         (?P<pointunit>(?:{unit_patterns['point']})\s*(?P<pointvalues>{list_num}))?\s*
         (?:(?:и\s+)?)
         (?P<articleunit>{unit_patterns['article']})\s*(?P<articlevalues>{list_num})\s*
-        (?P<lawname>[\w\s«»\-\.\"№NоА-Яа-яA-Za-z0-9]+?(?:\s+(?:кодекс|Кодекс|закон|Закон|ФЗ|КоАП|АПК|ГПК|ГК|УК|НК)[^\n\r\.;,]*)?)
+        {law_name_pattern}
     """
 
     compiled_pattern = re.compile(pattern, re.VERBOSE | re.IGNORECASE | re.UNICODE)
@@ -107,14 +112,58 @@ async def get_law_links(
         return [p.strip() for p in parts if p.strip()]
 
     def resolve_law_id(lawname: str) -> Optional[int]:
-        # Try exact lowercase match first
+        # Clean and normalize the law name
         key = lawname.strip().lower()
+        
+        # Try exact match first
         if key in alias_to_id:
             return alias_to_id[key]
-        # Fallback: try to find any alias contained within the lawname or vice versa
+        
+        # Try to find the best matching alias
+        best_match = None
+        best_score = 0
+        
         for alias, lid in alias_to_id.items():
-            if alias in key or key in alias:
-                return lid
+            # Calculate similarity score
+            if alias in key:
+                score = len(alias) / len(key)
+                if score > best_score:
+                    best_score = score
+                    best_match = lid
+            elif key in alias:
+                score = len(key) / len(alias)
+                if score > best_score:
+                    best_score = score
+                    best_match = lid
+        
+        # If we found a reasonable match (at least 50% similarity), return it
+        if best_score > 0.5:
+            return best_match
+            
+        # Special cases for common patterns - more comprehensive matching
+        if "воздушного кодекса" in key or "воздушный кодекс" in key:
+            return 3  # Воздушный кодекс
+        elif "бюджетного кодекса" in key or "бюджетный кодекс" in key:
+            return 1  # Бюджетный кодекс
+        elif "налогового кодекса" in key or "налоговый кодекс" in key:
+            return 15  # Налоговый кодекс
+        elif "лесного кодекса" in key or "лесной кодекс" in key:
+            return 14  # Лесной кодекс
+        elif "земельного кодекса" in key or "земельный кодекс" in key:
+            return 16  # Земельный кодекс
+        elif "семейного кодекса" in key or "семейный кодекс" in key:
+            return 8  # Семейный кодекс
+        elif "гражданского процессуального кодекса" in key or "гпк" in key:
+            return 6  # ГПК
+        elif "кодекса об административных правонарушениях" in key or "коап" in key:
+            return 17  # КоАП
+        elif "кодекса внутреннего водного транспорта" in key:
+            return 19  # Кодекс внутреннего водного транспорта
+        elif "указа президента" in key or "указ президента" in key:
+            # For presidential decrees, we'll need to match specific ones
+            # This is a fallback - specific cases should be in law_aliases.json
+            return None
+            
         return None
 
     links: List[LawLink] = []
